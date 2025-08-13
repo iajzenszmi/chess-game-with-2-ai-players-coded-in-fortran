@@ -1,0 +1,2146 @@
+ 
+:: initializing oneAPI environment ...
+   bash: BASH_VERSION = 5.2.21(1)-release
+   args: Using "$@" for setvars.sh arguments: 
+:: compiler -- latest
+:: debugger -- latest
+:: mpi -- latest
+:: umf -- latest
+:: oneAPI environment initialized ::
+ 
+(base) ian-martin-ajzenszmidt@ian-martin-ajzenszmidt-CFSZ5-3:~$ cat chesswed.f
+program chess_ai_vs_ai
+  implicit none
+  integer, parameter :: N=8
+  integer :: board(N,N)
+  integer :: side, ply, maxPlies
+  integer :: fi,fj,ti,tj,promo
+  call seed_rng()
+  call init_board(board)
+  side = 1             ! +1 = White, -1 = Black
+  maxPlies = 300       ! move limit to avoid endless games
+
+  call print_board(board)
+  do ply = 1, maxPlies
+     call choose_move(board, side, fi,fj,ti,tj,promo)
+     if (fi == 0) then
+        if (in_check(board, side)) then
+           if (side==1) then
+              print *, 'Checkmate on move ', ply, ': Black wins.'
+           else
+              print *, 'Checkmate on move ', ply, ': White wins.'
+           end if
+        else
+           print *, 'Stalemate on move ', ply, '.'
+        end if
+        exit
+     end if
+     call make_move(board, fi,fj,ti,tj,promo)
+     write(*,'(A,I0,A,A,A,A)') 'Move ', ply, ': ', side_name(-side), ' ', sq_name(fi,fj), ' -> '//sq_name(ti,tj)
+     if (promo /= 0) print *, '  (promotion to Queen)'
+     call print_board(board)
+     side = -side
+  end do
+  if (ply > maxPlies) print *, 'Draw by move limit.'
+
+contains
+
+  !----------------------- Utilities & I/O -----------------------
+  subroutine seed_rng()
+    integer :: i, n, seed, un, t
+    integer, allocatable :: seedv(:)
+    call system_clock(count=t)
+    call random_seed(size=n)
+    allocate(seedv(n))
+    seed = abs(1103515245*t + 12345)
+    do i=1,n
+       seed = xor(seed, ishft(seed, -13)); seed = seed*1664525 + 1013904223
+       seedv(i) = ior(1, iand(seed, z'7FFFFFFF'))
+    end do
+    call random_seed(put=seedv)
+    deallocate(seedv)
+  end subroutine seed_rng
+
+  pure function side_name(s) result(name)
+    integer, intent(in) :: s
+    character(len=5) :: name
+    if (s==1) then
+       name = 'White'
+    else
+       name = 'Black'
+    end if
+  end function side_name
+
+  pure function sq_name(i,j) result(sq)
+    integer, intent(in) :: i,j
+    character(len=2) :: sq
+    character(len=1) :: f, r
+    f = achar(iachar('a') + j-1)
+    r = achar(iachar('0') + i)
+    sq = f//r
+  end function sq_name
+
+  subroutine print_board(b)
+    integer, intent(in) :: b(N,N)
+    integer :: r,c, p
+    character(len=1) :: ch
+    print *, '   a b c d e f g h'
+    do r = N,1,-1
+       write(*,'(I2,1X)', advance='no') r
+       do c = 1,N
+          p = b(r,c)
+          ch = piece_char(p)
+          write(*,'(A)', advance='no') ' '//ch
+       end do
+       print *, ''
+    end do
+    print *, '   a b c d e f g h'
+    print *, ''
+  end subroutine print_board
+
+  pure function piece_char(p) result(ch)
+    integer, intent(in) :: p
+    character(len=1) :: ch
+    select case (abs(p))
+    case (0); ch='.'
+    case (1); ch=merge('P','p',p>0)
+    case (2); ch=merge('N','n',p>0)
+    case (3); ch=merge('B','b',p>0)
+    case (4); ch=merge('R','r',p>0)
+    case (5); ch=merge('Q','q',p>0)
+    case (6); ch=merge('K','k',p>0)
+    case default; ch='?'
+    end select
+  end function piece_char
+
+  pure logical function onboard(i,j)
+    integer, intent(in) :: i,j
+    onboard = (i>=1 .and. i<=N .and. j>=1 .and. j<=N)
+  end function onboard
+
+  !----------------------- Board & Moves -------------------------
+  subroutine init_board(b)
+    integer, intent(out) :: b(N,N)
+    integer :: r,c
+    b = 0
+    ! White
+    b(1,:) = (/ 4,2,3,5,6,3,2,4 /)
+    b(2,:) = 1
+    ! Black
+    b(8,:) = -(/ 4,2,3,5,6,3,2,4 /)
+    b(7,:) = -1
+  end subroutine init_board
+
+  subroutine make_move(b, fi,fj,ti,tj,promo)
+    integer, intent(inout) :: b(N,N)
+    integer, intent(in) :: fi,fj,ti,tj,promo
+    integer :: p
+    p = b(fi,fj)
+    b(ti,tj) = p
+    b(fi,fj) = 0
+    ! Promotion to queen if requested/needed
+    if (abs(p) == 1) then
+       if (ti == 8 .and. p>0) b(ti,tj) = 5
+       if (ti == 1 .and. p<0) b(ti,tj) = -5
+    end if
+    if (promo /= 0) then
+       if (b(ti,tj) > 0) b(ti,tj) = 5
+       if (b(ti,tj) < 0) b(ti,tj) = -5
+    end if
+  end subroutine make_move
+
+  pure integer function piece_value(p) result(v)
+    integer, intent(in) :: p
+    select case (abs(p))
+    case (1); v = 100
+    case (2); v = 320
+    case (3); v = 330
+    case (4); v = 500
+    case (5); v = 900
+    case (6); v = 20000
+    case default; v = 0
+    end select
+    if (p<0) v = -v
+  end function piece_value
+
+  pure integer function evaluate(b) result(score)
+    integer, intent(in) :: b(N,N)
+    integer :: r,c
+    score = 0
+    do r=1,N
+       do c=1,N
+          score = score + piece_value(b(r,c))
+       end do
+    end do
+  end function evaluate
+
+  ! Return TRUE if side 'att' attacks square (i,j)
+  pure logical function attacked_by(b, att, i, j)
+    integer, intent(in) :: b(N,N), att, i, j
+    integer :: r,c, dr,dc, k
+    integer, parameter :: KN(8,2) = reshape( (/ &
+      2,1,  1,2,  -1,2,  -2,1,  -2,-1,  -1,-2,  1,-2,  2,-1 /), (/8,2/) )
+
+    attacked_by = .false.
+
+    ! Pawns
+    if (att==1) then
+       if (onboard(i-1,j-1) .and. b(i-1,j-1)==1) attacked_by=.true.
+       if (onboard(i-1,j+1) .and. b(i-1,j+1)==1) attacked_by=.true.
+    else
+       if (onboard(i+1,j-1) .and. b(i+1,j-1)==-1) attacked_by=.true.
+       if (onboard(i+1,j+1) .and. b(i+1,j+1)==-1) attacked_by=.true.
+    end if
+    if (attacked_by) return
+
+    ! Knights
+    do k=1,8
+       r = i + KN(k,1); c = j + KN(k,2)
+       if (onboard(r,c)) then
+          if (b(r,c) ==  2*att) attacked_by=.true.
+       end if
+    end do
+    if (attacked_by) return
+
+    ! Bishops/Queens (diagonals)
+    do dr=-1,1,2
+       do dc=-1,1,2
+          r=i+dr; c=j+dc
+          do while (onboard(r,c))
+             if (b(r,c) /= 0) then
+                if (b(r,c) == 3*att .or. b(r,c) == 5*att) attacked_by=.true.
+                exit
+             end if
+             r=r+dr; c=c+dc
+          end do
+          if (attacked_by) return
+       end do
+    end do
+
+    ! Rooks/Queens (orthogonals)
+    do dr=-1,1,2
+       r=i+dr; c=j
+       do while (onboard(r,c))
+          if (b(r,c) /= 0) then
+             if (b(r,c) == 4*att .or. b(r,c) == 5*att) attacked_by=.true.
+             exit
+          end if
+          r=r+dr
+       end do
+       if (attacked_by) return
+    end do
+    do dc=-1,1,2
+       r=i; c=j+dc
+       do while (onboard(r,c))
+          if (b(r,c) /= 0) then
+             if (b(r,c) == 4*att .or. b(r,c) == 5*att) attacked_by=.true.
+             exit
+          end if
+          c=c+dc
+       end do
+       if (attacked_by) return
+    end do
+
+    ! King
+    do dr=-1,1
+       do dc=-1,1
+          if (dr==0 .and. dc==0) cycle
+          r=i+dr; c=j+dc
+          if (onboard(r,c)) then
+             if (b(r,c) == 6*att) attacked_by=.true.
+          end if
+       end do
+    end do
+  end function attacked_by
+
+  pure logical function in_check(b, s)
+    integer, intent(in) :: b(N,N), s
+    integer :: r,c
+    in_check = .false.
+    do r=1,N; do c=1,N
+       if (b(r,c) == 6*s) then
+          in_check = attacked_by(b, -s, r, c)
+          return
+       end if
+    end do; end do
+  end function in_check
+
+  subroutine generate_legal_moves(b, s, moves, nm)
+    integer, intent(in) :: b(N,N), s
+    integer, intent(out) :: moves(:, :)
+    integer, intent(out) :: nm
+    integer :: i,j, k, r,c, dr,dc
+    integer :: bb(N,N)
+    integer, parameter :: KN(8,2) = reshape( (/ &
+      2,1,  1,2,  -1,2,  -2,1,  -2,-1,  -1,-2,  1,-2,  2,-1 /), (/8,2/) )
+
+    nm = 0
+    do i=1,N
+       do j=1,N
+          if (b(i,j)*s <= 0) cycle
+          select case (abs(b(i,j)))
+          case (1)  ! Pawn
+             r = i + s; c = j
+             if (onboard(r,c) .and. b(r,c)==0) then
+                call try_add(i,j,r,c,b,s,moves,nm)
+                ! Double step
+                if ((s==1 .and. i==2) .or. (s==-1 .and. i==7)) then
+                   if (onboard(r+s,c) .and. b(r+s,c)==0) then
+                      call try_add(i,j,r+s,c,b,s,moves,nm)
+                   end if
+                end if
+             end if
+             ! Captures
+             if (onboard(i+s,j-1) .and. b(i+s,j-1)*s < 0) call try_add(i,j,i+s,j-1,b,s,moves,nm)
+             if (onboard(i+s,j+1) .and. b(i+s,j+1)*s < 0) call try_add(i,j,i+s,j+1,b,s,moves,nm)
+
+          case (2)  ! Knight
+             do k=1,8
+                r=i+KN(k,1); c=j+KN(k,2)
+                if (.not. onboard(r,c)) cycle
+                if (b(r,c)*s <= 0) call try_add(i,j,r,c,b,s,moves,nm)
+             end do
+
+          case (3)  ! Bishop
+             do dr=-1,1,2
+                do dc=-1,1,2
+                   r=i+dr; c=j+dc
+                   do while (onboard(r,c))
+                      if (b(r,c)==0) then
+                         call try_add(i,j,r,c,b,s,moves,nm)
+                      else
+                         if (b(r,c)*s < 0) call try_add(i,j,r,c,b,s,moves,nm)
+                         exit
+                      end if
+                      r=r+dr; c=c+dc
+                   end do
+                end do
+             end do
+
+          case (4)  ! Rook
+             do dr=-1,1,2
+                r=i+dr; c=j
+                do while (onboard(r,c))
+                   if (b(r,c)==0) then
+                      call try_add(i,j,r,c,b,s,moves,nm)
+                   else
+                      if (b(r,c)*s < 0) call try_add(i,j,r,c,b,s,moves,nm)
+                      exit
+                   end if
+                   r=r+dr
+                end do
+             end do
+             do dc=-1,1,2
+                r=i; c=j+dc
+                do while (onboard(r,c))
+                   if (b(r,c)==0) then
+                      call try_add(i,j,r,c,b,s,moves,nm)
+                   else
+                      if (b(r,c)*s < 0) call try_add(i,j,r,c,b,s,moves,nm)
+                      exit
+                   end if
+                   c=c+dc
+                end do
+             end do
+
+          case (5)  ! Queen
+             ! rook-like
+             do dr=-1,1,2
+                r=i+dr; c=j
+                do while (onboard(r,c))
+                   if (b(r,c)==0) then
+                      call try_add(i,j,r,c,b,s,moves,nm)
+                   else
+                      if (b(r,c)*s < 0) call try_add(i,j,r,c,b,s,moves,nm)
+                      exit
+                   end if
+                   r=r+dr
+                end do
+             end do
+             do dc=-1,1,2
+                r=i; c=j+dc
+                do while (onboard(r,c))
+                   if (b(r,c)==0) then
+                      call try_add(i,j,r,c,b,s,moves,nm)
+                   else
+                      if (b(r,c)*s < 0) call try_add(i,j,r,c,b,s,moves,nm)
+                      exit
+                   end if
+                   c=c+dc
+                end do
+             end do
+             ! bishop-like
+             do dr=-1,1,2
+                do dc=-1,1,2
+                   r=i+dr; c=j+dc
+                   do while (onboard(r,c))
+                      if (b(r,c)==0) then
+                         call try_add(i,j,r,c,b,s,moves,nm)
+                      else
+                         if (b(r,c)*s < 0) call try_add(i,j,r,c,b,s,moves,nm)
+                         exit
+                      end if
+                      r=r+dr; c=c+dc
+                   end do
+                end do
+             end do
+
+          case (6)  ! King (no castling)
+             do dr=-1,1
+                do dc=-1,1
+                   if (dr==0 .and. dc==0) cycle
+                   r=i+dr; c=j+dc
+                   if (onboard(r,c) .and. b(r,c)*s <= 0) then
+                      call try_add(i,j,r,c,b,s,moves,nm)
+                   end if
+                end do
+             end do
+          end select
+       end do
+    end do
+  end subroutine generate_legal_moves
+
+  subroutine try_add(fi,fj,ti,tj,b,s,moves,nm)
+    integer, intent(in) :: fi,fj,ti,tj, b(N,N), s
+    integer, intent(inout) :: moves(:, :)
+    integer, intent(inout) :: nm
+    integer :: bb(N,N), promo
+    bb = b
+    promo = 0
+    ! Handle promotion flagging (queen)
+    if (abs(b(fi,fj))==1) then
+       if (s==1 .and. ti==8) promo = 5
+       if (s==-1 .and. ti==1) promo = 5
+    end if
+    call make_move(bb, fi,fj,ti,tj,promo)
+    if (.not. in_check(bb, s)) then
+       nm = nm + 1
+       moves(nm,1)=fi; moves(nm,2)=fj
+       moves(nm,3)=ti; moves(nm,4)=tj
+       moves(nm,5)=promo
+    end if
+  end subroutine try_add
+
+  !----------------------- Search & Move choice ------------------
+  subroutine choose_move(b, s, fi,fj,ti,tj,promo)
+    integer, intent(in) :: b(N,N), s
+    integer, intent(out) :: fi,fj,ti,tj,promo
+    integer, parameter :: MAXM=256
+    integer :: moves(MAXM,5), nm, m
+    integer :: bestScore, score, depth
+    integer :: bb(N,N)
+    real :: rpick
+    integer, allocatable :: idx(:)
+    integer :: i
+    call generate_legal_moves(b, s, moves, nm)
+    if (nm == 0) then
+       fi=0; fj=0; ti=0; tj=0; promo=0
+       return
+    end if
+
+    bestScore = -2147483647
+    allocate(idx(nm))
+    do m=1,nm
+       bb = b
+       call make_move(bb, moves(m,1),moves(m,2),moves(m,3),moves(m,4),moves(m,5))
+       score = -search(bb, -s, 2, -2147483647/2, 2147483647/2)
+       if (score > bestScore) then
+          bestScore = score
+       end if
+    end do
+
+    ! collect all best moves (within small epsilon)
+    i=0
+    do m=1,nm
+       bb = b
+       call make_move(bb, moves(m,1),moves(m,2),moves(m,3),moves(m,4),moves(m,5))
+       score = -search(bb, -s, 2, -2147483647/2, 2147483647/2)
+       if (score >= bestScore) then
+          i=i+1; idx(i)=m
+       end if
+    end do
+
+    call random_number(rpick)
+    m = idx( max(1, int(rpick*i)+1) )
+    fi=moves(m,1); fj=moves(m,2); ti=moves(m,3); tj=moves(m,4); promo=moves(m,5)
+    deallocate(idx)
+  end subroutine choose_move
+
+  recursive integer function search(b, s, d, alpha, beta) result(val)
+    integer, intent(in) :: b(N,N), s, d, alpha, beta
+    integer :: a, be, sc
+    integer, parameter :: MAXM=256
+    integer :: moves(MAXM,5), nm, m
+    integer :: bb(N,N)
+    logical :: haveMove
+
+    a = alpha; be = beta
+
+    if (d == 0) then
+       val = evaluate(b) * s
+       return
+    end if
+
+    call generate_legal_moves(b, s, moves, nm)
+    if (nm == 0) then
+       if (in_check(b, s)) then
+          val = -2000000 + (2 - d)   ! checkmated: bad for side to move
+       else
+          val = 0                    ! stalemate: draw
+       end if
+       return
+    end if
+
+    val = -2147483647
+    do m=1,nm
+       bb = b
+       call make_move(bb, moves(m,1),moves(m,2),moves(m,3),moves(m,4),moves(m,5))
+       sc = -search(bb, -s, d-1, -be, -a)
+       if (sc > val) val = sc
+       if (val > a) a = val
+       if (a >= be) exit
+    end do
+  end function search
+
+end program chess_ai_vs_ai
+(base) ian-martin-ajzenszmidt@ian-martin-ajzenszmidt-CFSZ5-3:~$ ifx chesswed.f -free -o chesswed3
+(base) ian-martin-ajzenszmidt@ian-martin-ajzenszmidt-CFSZ5-3:~$ ./chesswed3
+    a b c d e f g h
+ 8  r n b q k b n r 
+ 7  p p p p p p p p 
+ 6  . . . . . . . . 
+ 5  . . . . . . . . 
+ 4  . . . . . . . . 
+ 3  . . . . . . . . 
+ 2  P P P P P P P P 
+ 1  R N B Q K B N R 
+    a b c d e f g h
+ 
+Move 1: Black b2
+ -> b4
+    a b c d e f g h
+ 8  r n b q k b n r 
+ 7  p p p p p p p p 
+ 6  . . . . . . . . 
+ 5  . . . . . . . . 
+ 4  . P . . . . . . 
+ 3  . . . . . . . . 
+ 2  P . P P P P P P 
+ 1  R N B Q K B N R 
+    a b c d e f g h
+ 
+Move 2: White f7
+ -> f6
+    a b c d e f g h
+ 8  r n b q k b n r 
+ 7  p p p p p . p p 
+ 6  . . . . . p . . 
+ 5  . . . . . . . . 
+ 4  . P . . . . . . 
+ 3  . . . . . . . . 
+ 2  P . P P P P P P 
+ 1  R N B Q K B N R 
+    a b c d e f g h
+ 
+Move 3: Black c1
+ -> b2
+    a b c d e f g h
+ 8  r n b q k b n r 
+ 7  p p p p p . p p 
+ 6  . . . . . p . . 
+ 5  . . . . . . . . 
+ 4  . P . . . . . . 
+ 3  . . . . . . . . 
+ 2  P B P P P P P P 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 4: White e7
+ -> e5
+    a b c d e f g h
+ 8  r n b q k b n r 
+ 7  p p p p . . p p 
+ 6  . . . . . p . . 
+ 5  . . . . p . . . 
+ 4  . P . . . . . . 
+ 3  . . . . . . . . 
+ 2  P B P P P P P P 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 5: Black b4
+ -> b5
+    a b c d e f g h
+ 8  r n b q k b n r 
+ 7  p p p p . . p p 
+ 6  . . . . . p . . 
+ 5  . P . . p . . . 
+ 4  . . . . . . . . 
+ 3  . . . . . . . . 
+ 2  P B P P P P P P 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 6: White f8
+ -> c5
+    a b c d e f g h
+ 8  r n b q k . n r 
+ 7  p p p p . . p p 
+ 6  . . . . . p . . 
+ 5  . P b . p . . . 
+ 4  . . . . . . . . 
+ 3  . . . . . . . . 
+ 2  P B P P P P P P 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 7: Black g2
+ -> g4
+    a b c d e f g h
+ 8  r n b q k . n r 
+ 7  p p p p . . p p 
+ 6  . . . . . p . . 
+ 5  . P b . p . . . 
+ 4  . . . . . . P . 
+ 3  . . . . . . . . 
+ 2  P B P P P P . P 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 8: White e8
+ -> f8
+    a b c d e f g h
+ 8  r n b q . k n r 
+ 7  p p p p . . p p 
+ 6  . . . . . p . . 
+ 5  . P b . p . . . 
+ 4  . . . . . . P . 
+ 3  . . . . . . . . 
+ 2  P B P P P P . P 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 9: Black c2
+ -> c4
+    a b c d e f g h
+ 8  r n b q . k n r 
+ 7  p p p p . . p p 
+ 6  . . . . . p . . 
+ 5  . P b . p . . . 
+ 4  . . P . . . P . 
+ 3  . . . . . . . . 
+ 2  P B . P P P . P 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 10: White d8
+ -> e7
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  p p p p q . p p 
+ 6  . . . . . p . . 
+ 5  . P b . p . . . 
+ 4  . . P . . . P . 
+ 3  . . . . . . . . 
+ 2  P B . P P P . P 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 11: Black h2
+ -> h3
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  p p p p q . p p 
+ 6  . . . . . p . . 
+ 5  . P b . p . . . 
+ 4  . . P . . . P . 
+ 3  . . . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 12: White e5
+ -> e4
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  p p p p q . p p 
+ 6  . . . . . p . . 
+ 5  . P b . . . . . 
+ 4  . . P . p . P . 
+ 3  . . . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 13: Black d1
+ -> a4
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  p p p p q . p p 
+ 6  . . . . . p . . 
+ 5  . P b . . . . . 
+ 4  Q . P . p . P . 
+ 3  . . . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 14: White b8
+ -> d6
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  p p p p q . p p 
+ 6  . . . n . p . . 
+ 5  . P b . . . . . 
+ 4  Q . P . p . P . 
+ 3  . . . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 15: Black a4
+ -> c2
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  p p p p q . p p 
+ 6  . . . n . p . . 
+ 5  . P b . . . . . 
+ 4  . . P . p . P . 
+ 3  . . . . . . . P 
+ 2  P B Q P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 16: White e7
+ -> e8
+    a b c d e f g h
+ 8  r . b . q k n r 
+ 7  p p p p . . p p 
+ 6  . . . n . p . . 
+ 5  . P b . . . . . 
+ 4  . . P . p . P . 
+ 3  . . . . . . . P 
+ 2  P B Q P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 17: Black c2
+ -> b3
+    a b c d e f g h
+ 8  r . b . q k n r 
+ 7  p p p p . . p p 
+ 6  . . . n . p . . 
+ 5  . P b . . . . . 
+ 4  . . P . p . P . 
+ 3  . Q . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 18: White d6
+ -> f4
+    a b c d e f g h
+ 8  r . b . q k n r 
+ 7  p p p p . . p p 
+ 6  . . . . . p . . 
+ 5  . P b . . . . . 
+ 4  . . P . p n P . 
+ 3  . Q . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 19: Black b2
+ -> c3
+    a b c d e f g h
+ 8  r . b . q k n r 
+ 7  p p p p . . p p 
+ 6  . . . . . p . . 
+ 5  . P b . . . . . 
+ 4  . . P . p n P . 
+ 3  . Q B . . . . P 
+ 2  P . . P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 20: White e8
+ -> e7
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  p p p p q . p p 
+ 6  . . . . . p . . 
+ 5  . P b . . . . . 
+ 4  . . P . p n P . 
+ 3  . Q B . . . . P 
+ 2  P . . P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 21: Black c3
+ -> b2
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  p p p p q . p p 
+ 6  . . . . . p . . 
+ 5  . P b . . . . . 
+ 4  . . P . p n P . 
+ 3  . Q . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 22: White g7
+ -> g5
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  p p p p q . . p 
+ 6  . . . . . p . . 
+ 5  . P b . . . p . 
+ 4  . . P . p n P . 
+ 3  . Q . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . . K B N R 
+    a b c d e f g h
+ 
+Move 23: Black b3
+ -> d1
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  p p p p q . . p 
+ 6  . . . . . p . . 
+ 5  . P b . . . p . 
+ 4  . . P . p n P . 
+ 3  . . . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 24: White c5
+ -> b4
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  p p p p q . . p 
+ 6  . . . . . p . . 
+ 5  . P . . . . p . 
+ 4  . b P . p n P . 
+ 3  . . . . . . . P 
+ 2  P B . P P P . . 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 25: Black a2
+ -> a4
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  p p p p q . . p 
+ 6  . . . . . p . . 
+ 5  . P . . . . p . 
+ 4  P b P . p n P . 
+ 3  . . . . . . . P 
+ 2  . B . P P P . . 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 26: White a7
+ -> a5
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  . p p p q . . p 
+ 6  . . . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p n P . 
+ 3  . . . . . . . P 
+ 2  . B . P P P . . 
+ 1  R N . Q K B N R 
+    a b c d e f g h
+ 
+Move 27: Black b1
+ -> a2
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  . p p p q . . p 
+ 6  . . . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p n P . 
+ 3  . . . . . . . P 
+ 2  N B . P P P . . 
+ 1  R . . Q K B N R 
+    a b c d e f g h
+ 
+Move 28: White a8
+ -> a7
+    a b c d e f g h
+ 8  . . b . . k n r 
+ 7  r p p p q . . p 
+ 6  . . . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p n P . 
+ 3  . . . . . . . P 
+ 2  N B . P P P . . 
+ 1  R . . Q K B N R 
+    a b c d e f g h
+ 
+Move 29: Black d1
+ -> c2
+    a b c d e f g h
+ 8  . . b . . k n r 
+ 7  r p p p q . . p 
+ 6  . . . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p n P . 
+ 3  . . . . . . . P 
+ 2  N B Q P P P . . 
+ 1  R . . . K B N R 
+    a b c d e f g h
+ 
+Move 30: White a7
+ -> a8
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  . p p p q . . p 
+ 6  . . . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p n P . 
+ 3  . . . . . . . P 
+ 2  N B Q P P P . . 
+ 1  R . . . K B N R 
+    a b c d e f g h
+ 
+Move 31: Black e2
+ -> e3
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  . p p p q . . p 
+ 6  . . . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p n P . 
+ 3  . . . . P . . P 
+ 2  N B Q P . P . . 
+ 1  R . . . K B N R 
+    a b c d e f g h
+ 
+Move 32: White f4
+ -> d6
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  . p p p q . . p 
+ 6  . . . n . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  N B Q P . P . . 
+ 1  R . . . K B N R 
+    a b c d e f g h
+ 
+Move 33: Black c2
+ -> c1
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  . p p p q . . p 
+ 6  . . . n . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  N B . P . P . . 
+ 1  R . Q . K B N R 
+    a b c d e f g h
+ 
+Move 34: White b7
+ -> b6
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  . . p p q . . p 
+ 6  . p . n . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  N B . P . P . . 
+ 1  R . Q . K B N R 
+    a b c d e f g h
+ 
+Move 35: Black a2
+ -> b1
+    a b c d e f g h
+ 8  r . b . . k n r 
+ 7  . . p p q . . p 
+ 6  . p . n . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . B . P . P . . 
+ 1  R N Q . K B N R 
+    a b c d e f g h
+ 
+Move 36: White d6
+ -> b8
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p q . . p 
+ 6  . p . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . B . P . P . . 
+ 1  R N Q . K B N R 
+    a b c d e f g h
+ 
+Move 37: Black b2
+ -> d4
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p q . . p 
+ 6  . p . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P B p . P . 
+ 3  . . . . P . . P 
+ 2  . . . P . P . . 
+ 1  R N Q . K B N R 
+    a b c d e f g h
+ 
+Move 38: White e7
+ -> f7
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p . q . p 
+ 6  . p . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P B p . P . 
+ 3  . . . . P . . P 
+ 2  . . . P . P . . 
+ 1  R N Q . K B N R 
+    a b c d e f g h
+ 
+Move 39: Black f1
+ -> e2
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p . q . p 
+ 6  . p . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P B p . P . 
+ 3  . . . . P . . P 
+ 2  . . . P B P . . 
+ 1  R N Q . K . N R 
+    a b c d e f g h
+ 
+Move 40: White f7
+ -> e7
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p q . . p 
+ 6  . p . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P B p . P . 
+ 3  . . . . P . . P 
+ 2  . . . P B P . . 
+ 1  R N Q . K . N R 
+    a b c d e f g h
+ 
+Move 41: Black e1
+ -> f1
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p q . . p 
+ 6  . p . . . p . . 
+ 5  p P . . . . p . 
+ 4  P b P B p . P . 
+ 3  . . . . P . . P 
+ 2  . . . P B P . . 
+ 1  R N Q . . K N R 
+    a b c d e f g h
+ 
+Move 42: White e7
+ -> d6
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p . . . p 
+ 6  . p . q . p . . 
+ 5  p P . . . . p . 
+ 4  P b P B p . P . 
+ 3  . . . . P . . P 
+ 2  . . . P B P . . 
+ 1  R N Q . . K N R 
+    a b c d e f g h
+ 
+Move 43: Black c1
+ -> b2
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p . . . p 
+ 6  . p . q . p . . 
+ 5  p P . . . . p . 
+ 4  P b P B p . P . 
+ 3  . . . . P . . P 
+ 2  . Q . P B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 44: White h7
+ -> h5
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p . . . . 
+ 6  . p . q . p . . 
+ 5  p P . . . . p p 
+ 4  P b P B p . P . 
+ 3  . . . . P . . P 
+ 2  . Q . P B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 45: Black d4
+ -> f6
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p . . . . 
+ 6  . p . q . B . . 
+ 5  p P . . . . p p 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . Q . P B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 46: White d6
+ -> d2
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p . . . . 
+ 6  . p . . . B . . 
+ 5  p P . . . . p p 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . Q . q B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 47: Black f6
+ -> g7
+    a b c d e f g h
+ 8  r n b . . k n r 
+ 7  . . p p . . B . 
+ 6  . p . . . . . . 
+ 5  p P . . . . p p 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . Q . q B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 48: White f8
+ -> e8
+    a b c d e f g h
+ 8  r n b . k . n r 
+ 7  . . p p . . B . 
+ 6  . p . . . . . . 
+ 5  p P . . . . p p 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . Q . q B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 49: Black b2
+ -> e5
+    a b c d e f g h
+ 8  r n b . k . n r 
+ 7  . . p p . . B . 
+ 6  . p . . . . . . 
+ 5  p P . . Q . p p 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . q B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 50: White e8
+ -> d8
+    a b c d e f g h
+ 8  r n b k . . n r 
+ 7  . . p p . . B . 
+ 6  . p . . . . . . 
+ 5  p P . . Q . p p 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . q B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 51: Black e5
+ -> g5
+    a b c d e f g h
+ 8  r n b k . . n r 
+ 7  . . p p . . B . 
+ 6  . p . . . . . . 
+ 5  p P . . . . Q p 
+ 4  P b P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . q B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 52: White b4
+ -> e7
+    a b c d e f g h
+ 8  r n b k . . n r 
+ 7  . . p p b . B . 
+ 6  . p . . . . . . 
+ 5  p P . . . . Q p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . q B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 53: Black g7
+ -> f6
+    a b c d e f g h
+ 8  r n b k . . n r 
+ 7  . . p p b . . . 
+ 6  . p . . . B . . 
+ 5  p P . . . . Q p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . q B P . . 
+ 1  R N . . . K N R 
+    a b c d e f g h
+ 
+Move 54: White d2
+ -> c1
+    a b c d e f g h
+ 8  r n b k . . n r 
+ 7  . . p p b . . . 
+ 6  . p . . . B . . 
+ 5  p P . . . . Q p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . . B P . . 
+ 1  R N q . . K N R 
+    a b c d e f g h
+ 
+Move 55: Black f1
+ -> g2
+    a b c d e f g h
+ 8  r n b k . . n r 
+ 7  . . p p b . . . 
+ 6  . p . . . B . . 
+ 5  p P . . . . Q p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 56: White e7
+ -> f6
+    a b c d e f g h
+ 8  r n b k . . n r 
+ 7  . . p p . . . . 
+ 6  . p . . . b . . 
+ 5  p P . . . . Q p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 57: Black g5
+ -> f6
+    a b c d e f g h
+ 8  r n b k . . n r 
+ 7  . . p p . . . . 
+ 6  . p . . . Q . . 
+ 5  p P . . . . . p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 58: White d8
+ -> e8
+    a b c d e f g h
+ 8  r n b . k . n r 
+ 7  . . p p . . . . 
+ 6  . p . . . Q . . 
+ 5  p P . . . . . p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 59: Black f6
+ -> h8
+    a b c d e f g h
+ 8  r n b . k . n Q 
+ 7  . . p p . . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . . . p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 60: White e8
+ -> e7
+    a b c d e f g h
+ 8  r n b . . . n Q 
+ 7  . . p p k . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . . . p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 61: Black h8
+ -> g8
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p k . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . . . p 
+ 4  P . P . p . P . 
+ 3  . . . . P . . P 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 62: White h5
+ -> g4
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p k . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . p . 
+ 3  . . . . P . . P 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 63: Black h3
+ -> g4
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p k . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N q . . . N R 
+    a b c d e f g h
+ 
+Move 64: White c1
+ -> e1
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p k . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N R 
+    a b c d e f g h
+ 
+Move 65: Black h1
+ -> h7
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p k . . R 
+ 6  . p . . . . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 66: White e7
+ -> f6
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p . . . R 
+ 6  . p . . . k . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 67: Black h7
+ -> h6
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p . . . . 
+ 6  . p . . . k . R 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 68: White f6
+ -> e7
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p k . . . 
+ 6  . p . . . . . R 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 69: Black h6
+ -> h7
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p k . . R 
+ 6  . p . . . . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 70: White e7
+ -> f6
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p . . . R 
+ 6  . p . . . k . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 71: Black g8
+ -> h8
+    a b c d e f g h
+ 8  r n b . . . . Q 
+ 7  . . p p . . . R 
+ 6  . p . . . k . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 72: White f6
+ -> e6
+    a b c d e f g h
+ 8  r n b . . . . Q 
+ 7  . . p p . . . R 
+ 6  . p . . k . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 73: Black h8
+ -> g8
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p . . . R 
+ 6  . p . . k . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 74: White e6
+ -> f6
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p . . . R 
+ 6  . p . . . k . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . P . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 75: Black g4
+ -> g5
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p . . . R 
+ 6  . p . . . k . . 
+ 5  p P . . . . P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 76: White f6
+ -> f5
+    a b c d e f g h
+ 8  r n b . . . Q . 
+ 7  . . p p . . . R 
+ 6  . p . . . . . . 
+ 5  p P . . . k P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 77: Black g8
+ -> d5
+    a b c d e f g h
+ 8  r n b . . . . . 
+ 7  . . p p . . . R 
+ 6  . p . . . . . . 
+ 5  p P . Q . k P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 78: White f5
+ -> g6
+    a b c d e f g h
+ 8  r n b . . . . . 
+ 7  . . p p . . . R 
+ 6  . p . . . . k . 
+ 5  p P . Q . . P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 79: Black h7
+ -> h6
+    a b c d e f g h
+ 8  r n b . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . . . . k R 
+ 5  p P . Q . . P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 80: White g6
+ -> g7
+    a b c d e f g h
+ 8  r n b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . R 
+ 5  p P . Q . . P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 81: Black d5
+ -> a8
+    a b c d e f g h
+ 8  Q n b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . R 
+ 5  p P . . . . P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . B P K . 
+ 1  R N . . q . N . 
+    a b c d e f g h
+ 
+Move 82: White e1
+ -> e2
+    a b c d e f g h
+ 8  Q n b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . R 
+ 5  p P . . . . P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . q P K . 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 83: Black a8
+ -> b8
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . R 
+ 5  p P . . . . P . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . q P K . 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 84: White e2
+ -> g4
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . R 
+ 5  p P . . . . P . 
+ 4  P . P . p . q . 
+ 3  . . . . P . . . 
+ 2  . . . . . P K . 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 85: Black g2
+ -> h2
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . R 
+ 5  p P . . . . P . 
+ 4  P . P . p . q . 
+ 3  . . . . P . . . 
+ 2  . . . . . P . K 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 86: White g4
+ -> g5
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . R 
+ 5  p P . . . . q . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  . . . . . P . K 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 87: Black h6
+ -> h3
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . . 
+ 5  p P . . . . q . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . R 
+ 2  . . . . . P . K 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 88: White g5
+ -> e5
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . . 
+ 5  p P . . q . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . R 
+ 2  . . . . . P . K 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 89: Black h3
+ -> g3
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . k . 
+ 6  . p . . . . . . 
+ 5  p P . . q . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  . . . . . P . K 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 90: White g7
+ -> f6
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . . . k . . 
+ 5  p P . . q . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  . . . . . P . K 
+ 1  R N . . . . N . 
+    a b c d e f g h
+ 
+Move 91: Black a1
+ -> a2
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . . . k . . 
+ 5  p P . . q . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  R . . . . P . K 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 92: White f6
+ -> e6
+    a b c d e f g h
+ 8  . Q b . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . . k . . . 
+ 5  p P . . q . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  R . . . . P . K 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 93: Black b8
+ -> c8
+    a b c d e f g h
+ 8  . . Q . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . . k . . . 
+ 5  p P . . q . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  R . . . . P . K 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 94: White e5
+ -> h5
+    a b c d e f g h
+ 8  . . Q . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . . k . . . 
+ 5  p P . . . . . q 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  R . . . . P . K 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 95: Black h2
+ -> g2
+    a b c d e f g h
+ 8  . . Q . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . . k . . . 
+ 5  p P . . . . . q 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 96: White e6
+ -> d6
+    a b c d e f g h
+ 8  . . Q . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . k . . . . 
+ 5  p P . . . . . q 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 97: Black a2
+ -> b2
+    a b c d e f g h
+ 8  . . Q . . . . . 
+ 7  . . p p . . . . 
+ 6  . p . k . . . . 
+ 5  p P . . . . . q 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  . R . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 98: White d6
+ -> e7
+    a b c d e f g h
+ 8  . . Q . . . . . 
+ 7  . . p p k . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . . . q 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  . R . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 99: Black c8
+ -> c7
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . Q p k . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . . . q 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  . R . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 100: White h5
+ -> f5
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . Q p k . . . 
+ 6  . p . . . . . . 
+ 5  p P . . . q . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  . R . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 101: Black c7
+ -> b6
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p k . . . 
+ 6  . Q . . . . . . 
+ 5  p P . . . q . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  . R . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 102: White f5
+ -> e5
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p k . . . 
+ 6  . Q . . . . . . 
+ 5  p P . . q . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  . R . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 103: Black b2
+ -> a2
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p k . . . 
+ 6  . Q . . . . . . 
+ 5  p P . . q . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 104: White e5
+ -> d6
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p k . . . 
+ 6  . Q . q . . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . R . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 105: Black g3
+ -> g7
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p k . R . 
+ 6  . Q . q . . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 106: White e7
+ -> e6
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p . . R . 
+ 6  . Q . q k . . . 
+ 5  p P . . . . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 107: Black g7
+ -> g6
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p . . . . 
+ 6  . Q . q k . R . 
+ 5  p P . . . . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 108: White e6
+ -> e5
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p . . . . 
+ 6  . Q . q . . R . 
+ 5  p P . . k . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 109: Black g6
+ -> d6
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p . . . . 
+ 6  . Q . R . . . . 
+ 5  p P . . k . . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 110: White e5
+ -> f5
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p . . . . 
+ 6  . Q . R . . . . 
+ 5  p P . . . k . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 111: Black b6
+ -> a5
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p . . . . 
+ 6  . . . R . . . . 
+ 5  Q P . . . k . . 
+ 4  P . P . p . . . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 112: White f5
+ -> g4
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p . . . . 
+ 6  . . . R . . . . 
+ 5  Q P . . . . . . 
+ 4  P . P . p . k . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 113: Black d6
+ -> d5
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . p . . . . 
+ 6  . . . . . . . . 
+ 5  Q P . R . . . . 
+ 4  P . P . p . k . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 114: White d7
+ -> d6
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  . . . . . . . . 
+ 6  . . . p . . . . 
+ 5  Q P . R . . . . 
+ 4  P . P . p . k . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 115: Black a5
+ -> a7
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  Q . . . . . . . 
+ 6  . . . p . . . . 
+ 5  . P . R . . . . 
+ 4  P . P . p . k . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 116: White g4
+ -> h4
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  Q . . . . . . . 
+ 6  . . . p . . . . 
+ 5  . P . R . . . . 
+ 4  P . P . p . . k 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 117: Black b5
+ -> b6
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  Q . . . . . . . 
+ 6  . P . p . . . . 
+ 5  . . . R . . . . 
+ 4  P . P . p . . k 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 118: White h4
+ -> g4
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  Q . . . . . . . 
+ 6  . P . p . . . . 
+ 5  . . . R . . . . 
+ 4  P . P . p . k . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 119: Black b6
+ -> b7
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  Q P . . . . . . 
+ 6  . . . p . . . . 
+ 5  . . . R . . . . 
+ 4  P . P . p . k . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 120: White g4
+ -> h4
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  Q P . . . . . . 
+ 6  . . . p . . . . 
+ 5  . . . R . . . . 
+ 4  P . P . p . . k 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 121: Black b7
+ -> b8
+   (promotion to Queen)
+    a b c d e f g h
+ 8  . Q . . . . . . 
+ 7  Q . . . . . . . 
+ 6  . . . p . . . . 
+ 5  . . . R . . . . 
+ 4  P . P . p . . k 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 122: White h4
+ -> g4
+    a b c d e f g h
+ 8  . Q . . . . . . 
+ 7  Q . . . . . . . 
+ 6  . . . p . . . . 
+ 5  . . . R . . . . 
+ 4  P . P . p . k . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 123: Black b8
+ -> g8
+    a b c d e f g h
+ 8  . . . . . . Q . 
+ 7  Q . . . . . . . 
+ 6  . . . p . . . . 
+ 5  . . . R . . . . 
+ 4  P . P . p . k . 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 124: White g4
+ -> h4
+    a b c d e f g h
+ 8  . . . . . . Q . 
+ 7  Q . . . . . . . 
+ 6  . . . p . . . . 
+ 5  . . . R . . . . 
+ 4  P . P . p . . k 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+Move 125: Black g8
+ -> g5
+    a b c d e f g h
+ 8  . . . . . . . . 
+ 7  Q . . . . . . . 
+ 6  . . . p . . . . 
+ 5  . . . R . . Q . 
+ 4  P . P . p . . k 
+ 3  . . . . P . . . 
+ 2  R . . . . P K . 
+ 1  . N . . . . N . 
+    a b c d e f g h
+ 
+ Checkmate on move          126 : White wins.
+(base) ian-martin-ajzenszmidt@ian-martin-ajzenszmidt-CFSZ5-3:~$ 
